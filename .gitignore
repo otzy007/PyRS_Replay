@@ -129,3 +129,6 @@ dmypy.json
 .pyre/
 
 test_runs/
+
+# ignore MacOS system files
+.DS_Store
