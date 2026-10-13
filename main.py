@@ -255,6 +255,8 @@ class CLapsFrame(customtkinter.CTkScrollableFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.laps=[]
+        # set by App: called with a lap number when the user clicks a lap label
+        self.select_callback=None
         
     def ms2HMS(self,ms):
         ms = ms * 10
@@ -266,13 +268,18 @@ class CLapsFrame(customtkinter.CTkScrollableFrame):
     
     def addlaps(self,laptimes,lapdistances):
         i=0
-        eval_link = lambda x: (lambda p: self.extractlap(x))
+        eval_link = lambda x: (lambda p: self.on_lap_click(x))
         for laptime in laptimes:
             label = customtkinter.CTkLabel(self,text=str(i+1)+": "+self.ms2HMS(laptime)+" ("+str(round(lapdistances[i],1))+" Kms)")
             label.grid(row=i, column=0, padx=4)
             label.bind("<Button-1>", eval_link(i))
             self.laps.append(label)
             i+=1
+
+    def on_lap_click(self,i):
+        self.extractlap(i)
+        if self.select_callback is not None:
+            self.select_callback(i)
 
     def clearlaps(self):
         for lap in self.laps:
@@ -385,6 +392,8 @@ class App(customtkinter.CTk):
         self.pauseevent = Event()
         self.lastlap=-1
         self.playspeed=1.0
+        self.lapstartindices={}
+        self.renderseek=0
 
         
     def set_custom_start(self,coords):
@@ -415,6 +424,20 @@ class App(customtkinter.CTk):
         if(len(self.carpath)>0):
             self.map_widget.delete_all_path()
             self.colorize_path(maxlapspeed,startindex)   
+
+    def select_lap(self,i):
+        # jump the replay to the start of lap i, keeping playback running if it was
+        startindex=self.lapstartindices.get(i)
+        if startindex is None:
+            return
+        self.curindex=startindex
+        self.lastlap=-1
+        if self.isplaying:
+            # re-anchor the running render thread so it continues from here
+            self.renderseek=startindex
+            self.starttime=time.perf_counter_ns()
+        else:
+            self.update_carpos(startindex)
 
     def update_carpos(self,i):
         if(i>len(self.out)):return
@@ -625,6 +648,7 @@ class App(customtkinter.CTk):
         
         self.lapsframe = CLapsFrame(master=self.frame_runinfo, width=300,height=100)
         self.lapsframe.grid(row=col, column=0, padx=10, pady=10,columnspan=2,sticky='nsew')  
+        self.lapsframe.select_callback=self.select_lap
         col+=1
         
         self.vmax_label=customtkinter.CTkLabel(self.frame_runinfo, text="V max:")
@@ -864,6 +888,15 @@ class App(customtkinter.CTk):
                     self.lapdistances.append(lapdistance)
             c['lap']=self.nblaps
             i+=1
+        # first line index for each lap number, used to seek when a lap is selected
+        # (note: builtin enumerate is shadowed by threading.enumerate via `from threading import *`)
+        self.lapstartindices={}
+        idx=0
+        for line in self.out:
+            c = self.get_chan(10, line)
+            if c != 0 and c['lap'] not in self.lapstartindices:
+                self.lapstartindices[c['lap']] = idx
+            idx+=1
                 
     def lapDetection(self,fLatitude, fLongitude):
         bResult=False
@@ -1083,7 +1116,7 @@ class App(customtkinter.CTk):
         self.isplaying=True
         lastindex=-1
         rt=None
-        startindex=self.curindex
+        self.renderseek=self.curindex
         self.starttime = time.perf_counter_ns()
         while self.curindex < len(self.out)-1:
             if self.stopevent.is_set():
@@ -1095,7 +1128,7 @@ class App(customtkinter.CTk):
             now=time.perf_counter_ns()
             elapsed = now - self.starttime
             #self.curindex+=elapsed*0.0001
-            self.curindex=startindex+elapsed*10e-9*self.playspeed
+            self.curindex=self.renderseek+elapsed*10e-9*self.playspeed
             inti=round(self.curindex)
             if(inti==lastindex):
                 #self.starttime = time.perf_counter_ns()
