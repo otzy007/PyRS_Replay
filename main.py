@@ -19,6 +19,39 @@ from threading import *
 import math
 import tkinter as tk
 
+import geocoder
+from geocoder.base import MultipleResultsQuery
+
+# --- Third-party integration fixes -------------------------------------------------
+
+# Nominatim (used by tkintermapview for address lookups) answers with HTTP 403 when
+# a request has no descriptive User-Agent. The geocoder package sends no headers at
+# all, so requests falls back to its default UA, which Nominatim blocks. Inject a
+# proper User-Agent for every geocoder query.
+def _build_geocoder_headers(self, provider_key, **kwargs):
+    return {"User-Agent": "PyRS_Replay/1.0 (+https://github.com/unixseb/PyRS_Replay)"}
+
+MultipleResultsQuery._build_headers = _build_geocoder_headers
+
+# tkintermapview downloads map tiles in background threads and creates
+# PIL.ImageTk.PhotoImage objects there. Tkinter only allows Tk object creation from
+# the interpreter thread while its mainloop is running, so during startup those calls
+# fail with "RuntimeError: main thread is not in main loop" and leave half-initialised
+# PhotoImage objects behind. When garbage collected they raise
+# "AttributeError: 'PhotoImage' object has no attribute '_PhotoImage__photo'" from
+# __del__ (once per object). Gate the tile-loading threads until the mainloop has
+# started, at which point cross-thread Tk calls are safely queued onto the main thread.
+tile_threads_ready = Event()
+
+def _await_mainloop(func):
+    def wrapper(self, *args, **kwargs):
+        tile_threads_ready.wait()
+        return func(self, *args, **kwargs)
+    return wrapper
+
+TkinterMapView.load_images_background = _await_mainloop(TkinterMapView.load_images_background)
+TkinterMapView.pre_cache = _await_mainloop(TkinterMapView.pre_cache)
+
 customtkinter.set_default_color_theme("blue")  # Themes: "blue" (standard), "green", "dark-blue"
 
 class Pedalier(tk.Frame):
@@ -55,10 +88,9 @@ class WheelMeter(tk.Frame):
         self.curimg=self.canvas.create_image(100,100,image=self.wheelimg)
 
     def set_angle(self,angle):
-        oldimg=self.wheelimg
         newimg=ImageTk.PhotoImage(self.img.rotate(angle))
+        self.canvas.delete(self.curimg)
         self.curimg=self.canvas.create_image(100,100,image=newimg)
-        self.canvas.delete(oldimg)
         self.wheelimg=newimg
         
 
@@ -337,16 +369,16 @@ class App(customtkinter.CTk):
         self.map_widget.delete_all_marker()
         self.lapsframe.clearlaps()
         self.vmax_val.configure(text=" Kmh")
-        self.glatmax_val.configure(" G")
-        self.glonmax_val.configure(" G")
-        self.rpmmax_val.configure(" Tr/Mn")
-        self.tinmax_val.configure(" °C")
+        self.glatmax_val.configure(text=" G")
+        self.glonmax_val.configure(text=" G")
+        self.rpmmax_val.configure(text=" Tr/Mn")
+        self.tinmax_val.configure(text=" °C")
         self.powermax_val.configure(text="")
         self.minlat=self.minlng=float('inf')
         self.maxlat=self.maxlng=-float('inf')
         self.RUN_START_TIME=0
         self.RUN_END_TIME=0
-        self.runinfosframe.textmax_val.configure(" °C")
+        self.runinfosframe.textmax_val.configure(text=" °C")
         self.isplaying=False
         self.marker_list = []
         self.stopevent = Event()
@@ -549,21 +581,21 @@ class App(customtkinter.CTk):
         self.psframe.grid_columnconfigure(1, weight=1)
         self.psframe.grid_columnconfigure(4, weight=1)
         
-        imgplay=tk.PhotoImage(file='./imgs/play.png')
-        self.btplay=customtkinter.CTkButton(master=self.psframe,text="play",command=self.start_render,image=imgplay,width=32)
+        self.imgplay=customtkinter.CTkImage(Image.open('./imgs/play.png'), size=(32, 32))
+        self.btplay=customtkinter.CTkButton(master=self.psframe,text="play",command=self.start_render,image=self.imgplay,width=32)
         self.btplay.grid(row=0, column=0, sticky="e", padx=(0, 12), pady=0)
         self.curtimelabel = customtkinter.CTkLabel(self.psframe, text="0:00:00.000")
         self.curtimelabel.grid(row=0, column=1, padx=(20, 20), pady=(20, 0))
-        imgstop=tk.PhotoImage(file='./imgs/stop.png')
-        self.btstop=customtkinter.CTkButton(master=self.psframe,text="stop",command=self.stop_render,image=imgstop,width=32)
+        self.imgstop=customtkinter.CTkImage(Image.open('./imgs/stop.png'), size=(32, 32))
+        self.btstop=customtkinter.CTkButton(master=self.psframe,text="stop",command=self.stop_render,image=self.imgstop,width=32)
         self.btstop.grid(row=0, column=2, sticky="w", padx=(0, 12), pady=0)
-        imgslower=tk.PhotoImage(file='./imgs/slower.png')
-        self.btlower=customtkinter.CTkButton(master=self.psframe,text="slower",command=self.speed_down,image=imgslower,width=32)
+        self.imgslower=customtkinter.CTkImage(Image.open('./imgs/slower.png'), size=(32, 32))
+        self.btlower=customtkinter.CTkButton(master=self.psframe,text="slower",command=self.speed_down,image=self.imgslower,width=32)
         self.btlower.grid(row=0, column=3, sticky="e", padx=(0, 12), pady=0)
         self.rslabel=customtkinter.CTkLabel(self.psframe, text="1.0x",width=50)
         self.rslabel.grid(row=0, column=4, padx=(20, 20), pady=(20, 0))
-        imgfaster=tk.PhotoImage(file='./imgs/faster.png')
-        self.btfaster=customtkinter.CTkButton(master=self.psframe,text="faster",command=self.speed_up,image=imgfaster,width=32)
+        self.imgfaster=customtkinter.CTkImage(Image.open('./imgs/faster.png'), size=(32, 32))
+        self.btfaster=customtkinter.CTkButton(master=self.psframe,text="faster",command=self.speed_up,image=self.imgfaster,width=32)
         self.btfaster.grid(row=0, column=5, sticky="e", padx=(0, 12), pady=0)
         
         
@@ -1120,6 +1152,9 @@ class App(customtkinter.CTk):
         self.destroy()
 
     def start(self):
+        # release the tkintermapview tile-loading threads now that the Tk mainloop
+        # is running, so they create their PhotoImage objects on a live event loop
+        self.after(0, tile_threads_ready.set)
         self.mainloop()
 
     def get_temp(self,temps,temp):
